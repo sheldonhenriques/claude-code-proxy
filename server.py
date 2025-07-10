@@ -32,6 +32,69 @@ logging.getLogger("uvicorn").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
 
+
+def make_json_safe(obj, max_depth=3, current_depth=0):
+    """
+    Recursively convert objects to JSON-serializable format.
+    Handles Response objects, datetime objects, and other non-serializable types.
+    """
+    if current_depth > max_depth:
+        return f"<max_depth_reached: {type(obj).__name__}>"
+    
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    
+    if isinstance(obj, dict):
+        return {k: make_json_safe(v, max_depth, current_depth + 1) for k, v in obj.items()}
+    
+    if isinstance(obj, (list, tuple)):
+        return [make_json_safe(item, max_depth, current_depth + 1) for item in obj]
+    
+    # Handle Response objects (from httpx, requests, etc.)
+    if hasattr(obj, 'status_code') and hasattr(obj, 'text'):
+        try:
+            return {
+                "type": "Response",
+                "status_code": getattr(obj, 'status_code', None),
+                "headers": dict(getattr(obj, 'headers', {})),
+                "text": getattr(obj, 'text', '')[:1000],  # Limit text length
+                "url": str(getattr(obj, 'url', ''))
+            }
+        except Exception:
+            return f"<Response object: status={getattr(obj, 'status_code', 'unknown')}>"
+    
+    # Handle datetime objects
+    if hasattr(obj, 'isoformat'):
+        try:
+            return obj.isoformat()
+        except Exception:
+            pass
+    
+    # Handle exceptions
+    if isinstance(obj, Exception):
+        return {
+            "type": "Exception",
+            "class": type(obj).__name__,
+            "message": str(obj),
+            "args": make_json_safe(obj.args, max_depth, current_depth + 1)
+        }
+    
+    # Handle objects with __dict__
+    if hasattr(obj, '__dict__'):
+        try:
+            return {
+                "type": type(obj).__name__,
+                "attributes": make_json_safe(obj.__dict__, max_depth, current_depth + 1)
+            }
+        except Exception:
+            pass
+    
+    # Fallback: convert to string
+    try:
+        return str(obj)
+    except Exception:
+        return f"<non_serializable: {type(obj).__name__}>"
+
 # Create a filter to block any log messages containing specific strings
 class MessageFilter(logging.Filter):
     def filter(self, record):
@@ -1320,8 +1383,16 @@ async def create_message(
                 if key not in error_details and key not in ['args', '__traceback__']:
                     error_details[key] = str(value)
         
-        # Log all error details
-        logger.error(f"Error processing request: {json.dumps(error_details, indent=2)}")
+        # Make error_details JSON-safe before logging
+        safe_error_details = make_json_safe(error_details)
+        
+        # Log all error details safely
+        try:
+            logger.error(f"Error processing request: {json.dumps(safe_error_details, indent=2)}")
+        except Exception as log_error:
+            # Fallback if even the safe version fails
+            logger.error(f"Error processing request (fallback): {str(e)}")
+            logger.error(f"Logging error: {str(log_error)}")
         
         # Format error for response
         error_message = f"Error: {str(e)}"
